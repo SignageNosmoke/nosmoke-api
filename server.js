@@ -15,12 +15,24 @@ app.get('/scrape', async (req, res) => {
     try {
         browser = await puppeteer.launch({
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-dev-shm-usage', // Hindrer at gratisserveren krasjer pga lite RAM
+                '--disable-gpu'
+            ]
         });
         
         const page = await browser.newPage();
-        // Går til Nosmoke og venter til alt av Javascript (og lagerstatus) er lastet inn
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        
+        // Får roboten til å se ut som en helt vanlig Windows-PC
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
+
+        // Gå til URL og vent kun til selve innholdet er synlig (ignorerer bakgrunnsstøy)
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+        // Vent eksakt 4 sekunder slik at Nosmoke sitt Javascript (lagerstatus) rekker å laste
+        await new Promise(r => setTimeout(r, 4000));
 
         const productData = await page.evaluate(() => {
             let title = document.querySelector("h1")?.innerText || "Nytt produkt";
@@ -69,7 +81,8 @@ app.get('/scrape', async (req, res) => {
 
     } catch (error) {
         if (browser) await browser.close();
-        res.status(500).json({ title: "Feil ved henting", price: "0,-", inStock: true, syncFailed: true });
+        console.error("Skrape-feil:", error.message);
+        res.status(500).json({ title: "Feil ved henting", price: "0,-", inStock: true, syncFailed: true, error: error.message });
     }
 });
 

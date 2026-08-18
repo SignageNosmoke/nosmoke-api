@@ -6,16 +6,24 @@ const cron = require('node-cron');
 const app = express();
 app.use(cors());
 
-app.get('/scrape', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
+// --- DØRVAKT / KØ-SYSTEM ---
+// Dette sikrer at Render-serveren aldri krasjer (OOM) selv om dashbordet sender mange forespørsler samtidig.
+let isScraping = false;
+const scrapeQueue = [];
 
+async function processQueue() {
+    if (isScraping || scrapeQueue.length === 0) return;
+    
+    isScraping = true;
+    const { targetUrl, res } = scrapeQueue.shift(); // Henter den første i køen
+    
     console.log("----------------------------------");
-    console.log("1. MOTTATT FORESPØRSEL: Starter skraping av: " + targetUrl);
+    console.log(`[DØRVAKT] Slipper inn: ${targetUrl}`);
+    console.log(`[DØRVAKT] Personer som fortsatt står i kø: ${scrapeQueue.length}`);
+    
     let browser;
-
     try {
-        console.log("2. Starter nettleser...");
+        console.log("2. Starter usynlig nettleser...");
         browser = await puppeteer.launch({
             headless: "new",
             args: [
@@ -23,7 +31,6 @@ app.get('/scrape', async (req, res) => {
                 '--disable-setuid-sandbox', 
                 '--disable-dev-shm-usage', 
                 '--disable-gpu'
-                // Fjernet --single-process for å unngå frys på Render
             ] 
         });
         
@@ -31,17 +38,17 @@ app.get('/scrape', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
-        console.log("4. Laster nettsiden til Nosmoke (Tidsgrense 45 sekunder)...");
+        console.log("4. Laster nettsiden til Nosmoke (Max 45 sek)...");
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-        console.log("5. Leter etter 18-års knapp...");
+        console.log("5. Sjekker 18-års knapp...");
         try {
             await page.evaluate(() => {
                 const btns = Array.from(document.querySelectorAll('button, a'));
                 const ageBtn = btns.find(b => b.textContent.toLowerCase().includes('18') || b.textContent.toLowerCase().includes('bekreft'));
                 if (ageBtn) ageBtn.click();
             });
-        } catch(e) { console.log("Fant ingen aldersknapp."); }
+        } catch(e) {}
         await new Promise(resolve => setTimeout(resolve, 1500));
 
         console.log("6. Trekker ned lager-gardin...");
@@ -51,10 +58,10 @@ app.get('/scrape', async (req, res) => {
                 const drop = elements.find(el => el.textContent.toLowerCase().includes('lagerstatus i butikk'));
                 if (drop) drop.click();
             });
-        } catch(e) { console.log("Fant ikke gardinen."); }
+        } catch(e) {}
         await new Promise(resolve => setTimeout(resolve, 2000));
 
-        console.log("7. Analyserer innholdet på skjermen...");
+        console.log("7. Skanner skjermen etter tall...");
         const productData = await page.evaluate(async () => {
             let title = document.querySelector("meta[property='og:title']")?.content || document.querySelector('h1')?.innerText || 'Nytt produkt';
             title = title.replace(/\s*[-|]\s*Nosmoke.*/i, '').trim();
@@ -148,15 +155,31 @@ app.get('/scrape', async (req, res) => {
             return { title, image, desc, price, inStock, stockQty, syncFailed };
         });
 
-        console.log("8. FERDIG! Resultat for Os: " + productData.stockQty + " på lager.");
+        console.log(`8. FERDIG! Resultat for Os: ${productData.stockQty} på lager (Feilet: ${productData.syncFailed})`);
         await browser.close();
         res.json(productData);
 
     } catch (error) {
-        console.error('FEIL:', error.message);
+        console.error('FEIL under skraping:', error.message);
         if (browser) await browser.close();
         res.status(500).json({ title: 'Feil ved henting', price: '0,-', inStock: true, syncFailed: true, error: error.message });
     }
+
+    // Når den er helt ferdig med denne lenken, gå videre til neste person i køen
+    isScraping = false;
+    processQueue();
+}
+
+app.get('/scrape', (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
+
+    // Legger URL-en pent i køen i stedet for å starte med en gang
+    scrapeQueue.push({ targetUrl, res });
+    console.log(`[NY LENKE MOTATT] Lagt i kø: ${targetUrl}. Total kølengde: ${scrapeQueue.length}`);
+    
+    // Ber dørvakten sjekke om det er klart til å starte
+    processQueue();
 });
 
 cron.schedule('0 4 * * *', async () => {

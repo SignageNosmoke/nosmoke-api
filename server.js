@@ -6,7 +6,7 @@ const cron = require('node-cron');
 const app = express();
 app.use(cors());
 
-// Hjelpefunksjon for selve skrapingen (samme som før)
+// Hjelpefunksjon for selve skrapingen
 async function scrapeProduct(targetUrl) {
     let browser;
     try {
@@ -14,10 +14,12 @@ async function scrapeProduct(targetUrl) {
             headless: 'new',
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote']
         });
+        
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await new Promise(resolve => setTimeout(resolve, 4000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
         const productData = await page.evaluate(async () => {
             let title = document.querySelector("meta[property='og:title']")?.content || document.querySelector('h1')?.innerText || 'Nytt produkt';
@@ -38,12 +40,28 @@ async function scrapeProduct(targetUrl) {
                 }
             }
 
+            // FORBEDRET METODE FOR Å FINNE PRODUKT-ID
             let productId = null;
-            const htmlContent = document.documentElement.innerHTML;
-            const idRegexes = [/name=["']products_id["'][^>]*value=["'](\d+)["']/i, /value=["'](\d+)["'][^>]*name=["']products_id["']/i, /data-product-id=["'](\d+)["']/i];
-            for (let rx of idRegexes) {
-                const match = htmlContent.match(rx);
-                if (match && match[1] && match[1].length < 10) { productId = match[1]; break; }
+            const hiddenInput = document.querySelector('input[name="products_id"], input[name="product_id"]');
+            
+            if (hiddenInput && hiddenInput.value) {
+                productId = hiddenInput.value;
+            } else {
+                const htmlContent = document.documentElement.innerHTML;
+                const idRegexes = [
+                    /name=["']products_id["'][^>]*value=["'](\d+)["']/i,
+                    /value=["'](\d+)["'][^>]*name=["']products_id["']/i,
+                    /data-product-id=["'](\d+)["']/i,
+                    /["']?product_id["']?\s*:\s*["']?(\d+)["']?/i,
+                    /['"]id['"]\s*:\s*['"](\d{4,8})['"]/i
+                ];
+                for (let rx of idRegexes) {
+                    const match = htmlContent.match(rx);
+                    if (match && match[1] && match[1].length < 10) {
+                        productId = match[1];
+                        break;
+                    }
+                }
             }
 
             let inStock = true;
@@ -56,12 +74,13 @@ async function scrapeProduct(targetUrl) {
                     if (apiRes.ok) {
                         const stockJson = await apiRes.json();
                         let osFound = false;
+                        
+                        // FIKSET LOOP: Sjekker samtlige butikker i listen for å finne 'Os'
                         for (let key in stockJson) {
-                            const storeObj = stockJson[key];
-                            if (storeObj) {
-                                const prodKeys = Object.keys(storeObj);
-                                if (prodKeys.length > 0) {
-                                    const details = storeObj[prodKeys[0]];
+                            const storeArray = stockJson[key];
+                            if (Array.isArray(storeArray)) {
+                                for (let i = 0; i < storeArray.length; i++) {
+                                    const details = storeArray[i];
                                     if (details && details.store && details.store.toLowerCase() === 'os') {
                                         const qty = parseInt(details.qty);
                                         inStock = qty > 0;
@@ -71,19 +90,32 @@ async function scrapeProduct(targetUrl) {
                                     }
                                 }
                             }
+                            if (osFound) break;
                         }
-                        if (!osFound) { inStock = false; stockQty = "0"; }
-                    } else { syncFailed = true; }
-                } catch (e) { syncFailed = true; }
-            } else { syncFailed = true; }
+                        
+                        if (!osFound) {
+                            inStock = false;
+                            stockQty = "0";
+                        }
+                    } else {
+                        syncFailed = true;
+                    }
+                } catch (e) {
+                    syncFailed = true;
+                }
+            } else {
+                syncFailed = true;
+            }
 
             return { title, image, desc, price, inStock, stockQty, syncFailed };
         });
 
         await browser.close();
         return productData;
+
     } catch (error) {
         if (browser) await browser.close();
+        console.error('Skrapefeil:', error.message);
         return { title: 'Feil ved henting', price: '0,-', inStock: true, syncFailed: true, error: error.message };
     }
 }
@@ -96,11 +128,9 @@ app.get('/scrape', async (req, res) => {
     res.json(data);
 });
 
-// --- DEN AUTOMATISKE VEKKERKLOKKEN (CRON) ---
-// Settes her til å kjøre hver natt klokken 04:00 (0 4 * * *)
+// Nattlig automatisk sjekk for tidsstyrt lagerstyring
 cron.schedule('0 4 * * *', async () => {
     console.log('Nattlig automatisk sjekk starter...');
-    // Her kan serveren utføre oppgaver i bakgrunnen
 });
 
 const PORT = process.env.PORT || 3000;

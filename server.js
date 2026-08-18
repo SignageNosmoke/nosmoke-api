@@ -18,7 +18,27 @@ async function scrapeProduct(targetUrl) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await new Promise(resolve => setTimeout(resolve, 4000));
+
+        // 1. KLIKK BORT ALDERSKONTROLL (hvis den finnes)
+        try {
+            await page.evaluate(() => {
+                const btns = Array.from(document.querySelectorAll('button, a'));
+                const ageBtn = btns.find(b => b.textContent.toLowerCase().includes('over 18') || b.textContent.toLowerCase().includes('bekreft'));
+                if (ageBtn) ageBtn.click();
+            });
+        } catch(e) {}
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        // 2. TREKK NED GARDINEN ("Lagerstatus i butikk")
+        try {
+            await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('div, span, button'));
+                const drop = elements.find(el => el.textContent.toLowerCase().includes('lagerstatus i butikk'));
+                if (drop) drop.click();
+            });
+        } catch(e) {}
+        // Vent litt ekstra slik at listen rekker å animeres ned før vi leser den
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         const productData = await page.evaluate(async () => {
             let title = document.querySelector("meta[property='og:title']")?.content || document.querySelector('h1')?.innerText || 'Nytt produkt';
@@ -39,108 +59,78 @@ async function scrapeProduct(targetUrl) {
                 }
             }
 
-            let productId = null;
-            const hiddenInput = document.querySelector('input[name="products_id"], input[name="product_id"]');
-            if (hiddenInput && hiddenInput.value) {
-                productId = hiddenInput.value;
-            } else {
-                const htmlContent = document.documentElement.innerHTML;
-                const idRegexes = [
-                    /name=["']products_id["'][^>]*value=["'](\d+)["']/i,
-                    /value=["'](\d+)["'][^>]*name=["']products_id["']/i,
-                    /data-product-id=["'](\d+)["']/i,
-                    /['"]id['"]\s*:\s*['"](\d{4,8})['"]/i
-                ];
-                for (let rx of idRegexes) {
-                    const match = htmlContent.match(rx);
-                    if (match && match[1] && match[1].length < 10) {
-                        productId = match[1];
-                        break;
-                    }
-                }
-            }
-
             let inStock = true;
             let stockQty = 'Ja';
-            let syncFailed = true; // Starter som 'true' frem til vi garantert finner et tall
+            let syncFailed = true;
 
-            // METODE 1: Det skjulte API-et
-            if (productId) {
-                try {
-                    const fetchUrl = window.location.origin + '/ajax.php?action=ajax&ajaxfunc=get_remote_stock&products_id=' + productId + '&product_id=' + productId;
-                    const apiRes = await fetch(fetchUrl);
-                    if (apiRes.ok) {
-                        const stockJson = await apiRes.json();
-                        const rawStr = JSON.stringify(stockJson).toLowerCase();
-                        
-                        // Søker etter 'os' uansett hvordan MyStore formaterer koden
-                        if (rawStr.includes('"os"')) {
-                            const match = rawStr.match(/"os"[^}]*"qty"\s*:\s*"?(\d+)"?/);
-                            if (match) {
-                                const qty = parseInt(match[1]);
-                                inStock = qty > 0;
-                                stockQty = qty.toString();
-                                syncFailed = false; // Suksess!
-                            } else {
-                                inStock = true;
-                                stockQty = "Ja";
-                                syncFailed = false;
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Ignorer og gå videre til Metode 2
-                }
-            }
+            // METODE A: Visuell lesing av rullegardinen du sendte bilde av
+            const bodyText = document.body.innerText || "";
+            const lines = bodyText.split('\n').map(l => l.trim());
 
-            // METODE 2: Visuell skraping (Hvis API-et feilet eller manglet ID)
-            if (syncFailed) {
-                // Robot-øynene leter spesifikt etter ordet "Os" på skjermen
-                const osTag = Array.from(document.querySelectorAll('b, span, div, td, th, li')).find(el => el.textContent.trim().toLowerCase() === 'os');
-                if (osTag) {
-                    let container = osTag.parentElement;
-                    let levels = 0;
-                    let fullText = "";
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                // Finner linjen som begynner eksakt med Os
+                if (line === 'Os' || line.startsWith('Os ')) {
+                    // Slår sammen med neste linje i tilfelle tallet havnet på linjen under (feks "Os \n 5")
+                    const textToInspect = line + " " + (lines[i+1] || "");
 
-                    while (container && levels < 5) {
-                        fullText = container.textContent.toLowerCase();
-                        if (fullText.includes('utsolgt') || fullText.includes('0 på lager') || fullText.includes('ikke på lager')) {
-                            inStock = false;
-                            stockQty = "0";
-                            syncFailed = false;
-                            break;
-                        }
-                        container = container.parentElement;
-                        levels++;
-                    }
-
-                    if (inStock && fullText) {
-                        const numMatch = fullText.match(/(\d+)\s*(?:på lager|stk)/i);
-                        if (numMatch) {
-                            stockQty = numMatch[1];
-                            syncFailed = false;
-                        } else if (fullText.includes('på lager')) {
-                            stockQty = "Ja";
-                            syncFailed = false;
-                        }
-                    }
-                } 
-                // Siste utvei: Sjekk om hele varen generelt er utsolgt
-                else {
-                    const outOfStockEl = document.querySelector('.out-of-stock, .sold-out, [disabled="disabled"]');
-                    if (outOfStockEl && outOfStockEl.innerText && outOfStockEl.innerText.toLowerCase().includes('utsolgt')) {
+                    if (textToInspect.toLowerCase().includes('ikke på lager') || textToInspect.toLowerCase().includes('utsolgt')) {
                         inStock = false;
                         stockQty = "0";
                         syncFailed = false;
+                        break;
                     } else {
-                        const stockTextEl = Array.from(document.querySelectorAll('div, span, p')).find(el => el.textContent.match(/(\d+)\s*På lager/i));
-                        if (stockTextEl) {
-                            const m = stockTextEl.textContent.match(/(\d+)\s*På lager/i);
+                        // Henter ut tallet etter "Os"
+                        const match = textToInspect.match(/Os\s+(\d+)/i);
+                        if (match) {
                             inStock = true;
-                            stockQty = m[1];
+                            stockQty = match[1];
                             syncFailed = false;
+                            break;
                         }
                     }
+                }
+            }
+
+            // METODE B: Backup hvis den visuelle sjekken feiler
+            if (syncFailed) {
+                let productId = document.body.getAttribute('data-product-id')
+                    || document.querySelector('[data-product-id]')?.getAttribute('data-product-id')
+                    || document.querySelector('input[name="products_id"]')?.value;
+
+                if (!productId) {
+                    const htmlContent = document.documentElement.innerHTML;
+                    const idRegexes = [ /products_id["'][^>]*value=["'](\d+)["']/i, /['"]id['"]\s*:\s*['"](\d{4,8})['"]/i ];
+                    for (let rx of idRegexes) {
+                        const match = htmlContent.match(rx);
+                        if (match && match[1]) { productId = match[1]; break; }
+                    }
+                }
+
+                if (productId) {
+                    try {
+                        const apiRes = await fetch(window.location.origin + '/ajax.php?action=ajax&ajaxfunc=get_remote_stock&products_id=' + productId);
+                        if (apiRes.ok) {
+                            const stockJson = await apiRes.json();
+                            const rawStr = JSON.stringify(stockJson).toLowerCase();
+
+                            const osMatch = rawStr.match(/store"[^}]*os[^}]*qty"\s*:\s*"?(\d+)"?/);
+                            if (osMatch) {
+                                const qty = parseInt(osMatch[1]);
+                                inStock = qty > 0;
+                                stockQty = qty.toString();
+                                syncFailed = false;
+                            } else if (rawStr.includes('os')) {
+                                inStock = true;
+                                stockQty = "Ja";
+                                syncFailed = false;
+                            } else {
+                                inStock = false;
+                                stockQty = "0";
+                                syncFailed = false;
+                            }
+                        }
+                    } catch (e) {}
                 }
             }
 

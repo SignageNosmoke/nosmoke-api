@@ -23,7 +23,7 @@ app.get('/scrape', async (req, res) => {
                 '--disable-setuid-sandbox', 
                 '--disable-dev-shm-usage', 
                 '--disable-gpu'
-                // Fjernet --single-process for å unngå at serveren fryser!
+                // Fjernet --single-process for å unngå frys på Render
             ] 
         });
         
@@ -31,8 +31,8 @@ app.get('/scrape', async (req, res) => {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
-        console.log("4. Laster nettsiden til Nosmoke...");
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        console.log("4. Laster nettsiden til Nosmoke (Tidsgrense 45 sekunder)...");
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
         console.log("5. Leter etter 18-års knapp...");
         try {
@@ -52,10 +52,10 @@ app.get('/scrape', async (req, res) => {
                 if (drop) drop.click();
             });
         } catch(e) { console.log("Fant ikke gardinen."); }
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         console.log("7. Analyserer innholdet på skjermen...");
-        const productData = await page.evaluate(() => {
+        const productData = await page.evaluate(async () => {
             let title = document.querySelector("meta[property='og:title']")?.content || document.querySelector('h1')?.innerText || 'Nytt produkt';
             title = title.replace(/\s*[-|]\s*Nosmoke.*/i, '').trim();
             
@@ -78,7 +78,7 @@ app.get('/scrape', async (req, res) => {
             let stockQty = 'Ja';
             let syncFailed = true;
 
-            // Leser rullegardinen visuelt
+            // METODE A: Visuell lesing av rullegardinen
             const bodyText = document.body.innerText || "";
             const lines = bodyText.split('\n').map(l => l.trim());
 
@@ -100,6 +100,48 @@ app.get('/scrape', async (req, res) => {
                             break;
                         }
                     }
+                }
+            }
+
+            // METODE B: Backup API (Hvis gardinen feilet)
+            if (syncFailed) {
+                let productId = document.body.getAttribute('data-product-id')
+                    || document.querySelector('[data-product-id]')?.getAttribute('data-product-id')
+                    || document.querySelector('input[name="products_id"]')?.value;
+
+                if (!productId) {
+                    const htmlContent = document.documentElement.innerHTML;
+                    const idRegexes = [ /products_id["'][^>]*value=["'](\d+)["']/i, /['"]id['"]\s*:\s*['"](\d{4,8})['"]/i ];
+                    for (let rx of idRegexes) {
+                        const match = htmlContent.match(rx);
+                        if (match && match[1]) { productId = match[1]; break; }
+                    }
+                }
+
+                if (productId) {
+                    try {
+                        const apiRes = await fetch(window.location.origin + '/ajax.php?action=ajax&ajaxfunc=get_remote_stock&products_id=' + productId);
+                        if (apiRes.ok) {
+                            const stockJson = await apiRes.json();
+                            const rawStr = JSON.stringify(stockJson).toLowerCase();
+
+                            const osMatch = rawStr.match(/store"[^}]*os[^}]*qty"\s*:\s*"?(\d+)"?/);
+                            if (osMatch) {
+                                const qty = parseInt(osMatch[1]);
+                                inStock = qty > 0;
+                                stockQty = qty.toString();
+                                syncFailed = false;
+                            } else if (rawStr.includes('os')) {
+                                inStock = true;
+                                stockQty = "Ja";
+                                syncFailed = false;
+                            } else {
+                                inStock = false;
+                                stockQty = "0";
+                                syncFailed = false;
+                            }
+                        }
+                    } catch (e) {}
                 }
             }
 

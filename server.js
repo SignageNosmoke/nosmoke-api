@@ -6,7 +6,6 @@ const cron = require('node-cron');
 const app = express();
 app.use(cors());
 
-// Hjelpefunksjon for selve skrapingen
 async function scrapeProduct(targetUrl) {
     let browser;
     try {
@@ -19,7 +18,7 @@ async function scrapeProduct(targetUrl) {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 4000));
 
         const productData = await page.evaluate(async () => {
             let title = document.querySelector("meta[property='og:title']")?.content || document.querySelector('h1')?.innerText || 'Nytt produkt';
@@ -40,10 +39,8 @@ async function scrapeProduct(targetUrl) {
                 }
             }
 
-            // FORBEDRET METODE FOR Å FINNE PRODUKT-ID
             let productId = null;
             const hiddenInput = document.querySelector('input[name="products_id"], input[name="product_id"]');
-            
             if (hiddenInput && hiddenInput.value) {
                 productId = hiddenInput.value;
             } else {
@@ -52,7 +49,6 @@ async function scrapeProduct(targetUrl) {
                     /name=["']products_id["'][^>]*value=["'](\d+)["']/i,
                     /value=["'](\d+)["'][^>]*name=["']products_id["']/i,
                     /data-product-id=["'](\d+)["']/i,
-                    /["']?product_id["']?\s*:\s*["']?(\d+)["']?/i,
                     /['"]id['"]\s*:\s*['"](\d{4,8})['"]/i
                 ];
                 for (let rx of idRegexes) {
@@ -66,45 +62,86 @@ async function scrapeProduct(targetUrl) {
 
             let inStock = true;
             let stockQty = 'Ja';
-            let syncFailed = false;
+            let syncFailed = true; // Starter som 'true' frem til vi garantert finner et tall
 
+            // METODE 1: Det skjulte API-et
             if (productId) {
                 try {
-                    const apiRes = await fetch('/ajax.php?action=ajax&ajaxfunc=get_remote_stock&products_id=' + productId);
+                    const fetchUrl = window.location.origin + '/ajax.php?action=ajax&ajaxfunc=get_remote_stock&products_id=' + productId + '&product_id=' + productId;
+                    const apiRes = await fetch(fetchUrl);
                     if (apiRes.ok) {
                         const stockJson = await apiRes.json();
-                        let osFound = false;
+                        const rawStr = JSON.stringify(stockJson).toLowerCase();
                         
-                        // FIKSET LOOP: Sjekker samtlige butikker i listen for å finne 'Os'
-                        for (let key in stockJson) {
-                            const storeArray = stockJson[key];
-                            if (Array.isArray(storeArray)) {
-                                for (let i = 0; i < storeArray.length; i++) {
-                                    const details = storeArray[i];
-                                    if (details && details.store && details.store.toLowerCase() === 'os') {
-                                        const qty = parseInt(details.qty);
-                                        inStock = qty > 0;
-                                        stockQty = qty.toString();
-                                        osFound = true;
-                                        break;
-                                    }
-                                }
+                        // Søker etter 'os' uansett hvordan MyStore formaterer koden
+                        if (rawStr.includes('"os"')) {
+                            const match = rawStr.match(/"os"[^}]*"qty"\s*:\s*"?(\d+)"?/);
+                            if (match) {
+                                const qty = parseInt(match[1]);
+                                inStock = qty > 0;
+                                stockQty = qty.toString();
+                                syncFailed = false; // Suksess!
+                            } else {
+                                inStock = true;
+                                stockQty = "Ja";
+                                syncFailed = false;
                             }
-                            if (osFound) break;
                         }
-                        
-                        if (!osFound) {
-                            inStock = false;
-                            stockQty = "0";
-                        }
-                    } else {
-                        syncFailed = true;
                     }
                 } catch (e) {
-                    syncFailed = true;
+                    // Ignorer og gå videre til Metode 2
                 }
-            } else {
-                syncFailed = true;
+            }
+
+            // METODE 2: Visuell skraping (Hvis API-et feilet eller manglet ID)
+            if (syncFailed) {
+                // Robot-øynene leter spesifikt etter ordet "Os" på skjermen
+                const osTag = Array.from(document.querySelectorAll('b, span, div, td, th, li')).find(el => el.textContent.trim().toLowerCase() === 'os');
+                if (osTag) {
+                    let container = osTag.parentElement;
+                    let levels = 0;
+                    let fullText = "";
+
+                    while (container && levels < 5) {
+                        fullText = container.textContent.toLowerCase();
+                        if (fullText.includes('utsolgt') || fullText.includes('0 på lager') || fullText.includes('ikke på lager')) {
+                            inStock = false;
+                            stockQty = "0";
+                            syncFailed = false;
+                            break;
+                        }
+                        container = container.parentElement;
+                        levels++;
+                    }
+
+                    if (inStock && fullText) {
+                        const numMatch = fullText.match(/(\d+)\s*(?:på lager|stk)/i);
+                        if (numMatch) {
+                            stockQty = numMatch[1];
+                            syncFailed = false;
+                        } else if (fullText.includes('på lager')) {
+                            stockQty = "Ja";
+                            syncFailed = false;
+                        }
+                    }
+                } 
+                // Siste utvei: Sjekk om hele varen generelt er utsolgt
+                else {
+                    const outOfStockEl = document.querySelector('.out-of-stock, .sold-out, [disabled="disabled"]');
+                    if (outOfStockEl && outOfStockEl.innerText && outOfStockEl.innerText.toLowerCase().includes('utsolgt')) {
+                        inStock = false;
+                        stockQty = "0";
+                        syncFailed = false;
+                    } else {
+                        const stockTextEl = Array.from(document.querySelectorAll('div, span, p')).find(el => el.textContent.match(/(\d+)\s*På lager/i));
+                        if (stockTextEl) {
+                            const m = stockTextEl.textContent.match(/(\d+)\s*På lager/i);
+                            inStock = true;
+                            stockQty = m[1];
+                            syncFailed = false;
+                        }
+                    }
+                }
             }
 
             return { title, image, desc, price, inStock, stockQty, syncFailed };
@@ -120,7 +157,6 @@ async function scrapeProduct(targetUrl) {
     }
 }
 
-// API-endepunktet du bruker fra dashbordet
 app.get('/scrape', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
@@ -128,7 +164,6 @@ app.get('/scrape', async (req, res) => {
     res.json(data);
 });
 
-// Nattlig automatisk sjekk for tidsstyrt lagerstyring
 cron.schedule('0 4 * * *', async () => {
     console.log('Nattlig automatisk sjekk starter...');
 });

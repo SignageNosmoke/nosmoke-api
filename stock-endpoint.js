@@ -126,6 +126,29 @@ function registerStockRoute(app) {
       res.status(500).json({ error: err.message, inStock: null });
     }
   });
+
+  // --- MIDLERTIDIG DEBUG-ROUTE ------------------------------------
+  // Brukes bare for å finne riktig regex-mønster for produkt-ID-en.
+  // Fjern denne route-en igjen når /stock fungerer stabilt.
+  //
+  // Bruk: /debug-html?url=<produkt-url>
+  // Åpne resultatet i nettleseren, trykk Ctrl+F, søk etter riktig
+  // produkt-ID-tall (f.eks. "11176"), og send meg linjen/teksten
+  // rundt treffet.
+  app.get("/debug-html", async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).send("Mangler url");
+    try {
+      const html = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; NosmokeSignage/1.0)" },
+      }).then((r) => r.text());
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.send(html);
+    } catch (err) {
+      res.status(500).send("Feil: " + err.message);
+    }
+  });
+  // -----------------------------------------------------------------
 }
 
 module.exports = { registerStockRoute };

@@ -29,7 +29,13 @@ async function fetchRemoteStockFromProductPage(productUrl) {
   if (!res.ok) throw new Error("Klarte ikke hente produktsiden (" + res.status + ")");
   const html = await res.text();
 
-  const match = html.match(/var\s+remote_stock\s*=\s*(\{[\s\S]*?\});/);
+  // Merk: "stock" i "{stock:{...}}" står UTEN anførselstegn i kildekoden
+  // (gyldig JavaScript, men ugyldig JSON). Vi hopper derfor forbi
+  // "stock:" og fanger kun det indre objektet, som består utelukkende
+  // av korrekt siterte nøkler/verdier og dermed ER gyldig JSON.
+  const match = html.match(
+    /var\s+remote_stock\s*=\s*\{\s*stock\s*:\s*(\{[\s\S]*?\})\s*\}\s*;/
+  );
   if (!match) {
     throw new Error("Fant ikke remote_stock-data på siden " + productUrl);
   }
@@ -41,8 +47,8 @@ async function fetchRemoteStockFromProductPage(productUrl) {
     throw new Error("Klarte ikke tolke remote_stock-JSON: " + e.message);
   }
 
-  // Strukturen er { stock: { <butikk-subdomene>: { <produktId>: {store, qty, stock} } } }
-  return parsed.stock || {};
+  // parsed er nå direkte { <butikk-subdomene>: { <produktId>: {store, qty, stock} } }
+  return parsed;
 }
 
 // ---------------------------------------------------------------------

@@ -22,7 +22,7 @@ async function fetchHtml(url) {
     }
     
     try {
-        // CACHE BUSTER! Sikrer at vi aldri får gamle svar fra Proxyen.
+        // Cache-Buster! Dette tvinger nettsiden til å glemme det gamle svaret.
         const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(url) + "&nocache=" + Date.now();
         const proxyRes = await fetch(proxyUrl);
         if (proxyRes.ok) return await proxyRes.text();
@@ -54,7 +54,7 @@ app.get('/scrape', async (req, res) => {
         
         let desc = '';
         
-        const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,2500})/i);
+        const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
         
         if (descBlock && descBlock[1]) {
             desc = descBlock[1]

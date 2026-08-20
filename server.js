@@ -22,7 +22,8 @@ async function fetchHtml(url) {
     }
     
     try {
-        const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(url);
+        // CACHE BUSTER! Sikrer at vi aldri får gamle svar fra Proxyen.
+        const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(url) + "&nocache=" + Date.now();
         const proxyRes = await fetch(proxyUrl);
         if (proxyRes.ok) return await proxyRes.text();
     } catch(e) {
@@ -53,38 +54,32 @@ app.get('/scrape', async (req, res) => {
         
         let desc = '';
         
-        // DEN NYE, BRUTALE UTHENTEREN:
-        // Vi leter etter startskuddet for beskrivelsen, og rapper med oss inntil 2500 tegn med rådata.
         const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,2500})/i);
         
         if (descBlock && descBlock[1]) {
             desc = descBlock[1]
-                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ') // Fjern CSS
-                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ') // Fjern scripts
-                .replace(/<li[^>]*>/gi, ' • ') // Gjør lister om til fine punkter
-                .replace(/<br\s*\/?>/gi, '\n') // Bevar linjeskift
-                .replace(/<\/p>/gi, '\n\n') // Bevar avsnitt
-                .replace(/<[^>]+>/g, '') // Knus alle andre HTML tags til støv!
+                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ') 
+                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ') 
+                .replace(/<li[^>]*>/gi, ' • ') 
+                .replace(/<br\s*\/?>/gi, '\n') 
+                .replace(/<\/p>/gi, '\n\n') 
+                .replace(/<[^>]+>/g, '') 
                 .replace(/&nbsp;/gi, ' ')
-                .replace(/\s{3,}/g, '\n\n') // Rydd opp i stygge mellomrom
+                .replace(/\s{3,}/g, '\n\n') 
                 .trim();
         }
 
-        // Fjern tittelen hvis MyStore har limt den inn helt øverst i beskrivelsen
         if (desc.toLowerCase().startsWith(title.toLowerCase())) {
             desc = desc.substring(title.length).trim();
         }
         
-        // Fjern faste ord som ofte står foran teksten
         desc = desc.replace(/^Produktinformasjon:?\s*/i, '').trim();
 
-        // Kriseløsning hvis alt over feiler
         if (!desc || desc.length < 15) {
             desc = extract(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) || 
                    extract(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) || '';
         }
 
-        // Rens uansett bort Nosmoke-spam
         desc = desc.replace(/\|\s*Norsk nettbutikk.*/i, '')
                    .replace(/Alle varer sendes fra Norge.*/i, '')
                    .replace(/Dette produktet har en aldersbegrensning.*/i, '')
@@ -94,7 +89,6 @@ app.get('/scrape', async (req, res) => {
             desc = '';
         }
 
-        // Kutt pent av hvis teksten er for lang for TV-skjermen
         if (desc.length > 250) {
             desc = desc.substring(0, 247) + '...';
         }

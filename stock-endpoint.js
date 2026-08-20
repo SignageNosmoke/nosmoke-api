@@ -1,115 +1,94 @@
 /**
- * FERDIG VERSJON — basert på det du fant i DevTools:
+ * FERDIG, FORENKLET VERSJON
  *
- *   POST https://www.nosmoke.no/ajax.php?action=ajax&ajaxfunc=get_remote_stock
- *   Body (form-urlencoded): product_ids=11176
+ * Oppdagelse: produktsidene på nosmoke.no inneholder allerede hele
+ * lagerstatusen for ALLE butikker ferdig utfylt i en <script>-tag:
  *
- *   Svar (JSON), én nøkkel per butikk (butikkens mystore-subdomene):
- *   {
- *     "pgvgosas_mystore_no": {
- *       "11176": { "store": "Os", "qty": 5, "stock": {...variant-id: antall...} }
- *     },
- *     "nosmokekrs_mystore_no": {
- *       "11176": { "store": "Kristiansand", "qty": 14, "stock": {...} }
- *     },
+ *   var remote_stock = {stock:{
+ *     "nosmokearendal_mystore_no": { "11176": { "store": "Arendal", "qty": 5, "stock": {...} } },
+ *     "pgvgosas_mystore_no":       { "11176": { "store": "Os",      "qty": 5, "stock": {...} } },
  *     ...
- *   }
+ *   }};
  *
- * LIM DETTE INN I server.js på Render (nosmoke-api), og kall
- * registerStockRoute(app) der du initialiserer Express-appen din
- * (samme sted du sikkert alt har noe sånt som app.get('/scrape', ...)).
+ * Vi trenger derfor bare ÉTT kall: hent produktsidens HTML, og plukk ut
+ * denne JSON-blokken direkte. Ikke noe eget POST-kall mot ajax.php,
+ * og ikke noe behov for å finne produkt-ID på forhånd.
+ *
+ * LIM DETTE INN I stock-endpoint.js på GitHub (erstatt alt), og
+ * server.js trenger ingen endring — den bruker allerede
+ * require('./stock-endpoint') og registerStockRoute(app).
  */
 
 // ---------------------------------------------------------------------
-// 1. Finn produkt-ID fra en vanlig nosmoke.no produkt-URL.
-//    nosmoke.no sine produktsider inneholder produkt-ID-en i HTML-en
-//    (bekreftet: Xros 5-siden inneholder "10958" på denne måten).
+// 1. Hent produktsiden og plukk ut remote_stock-JSON-blokken.
 // ---------------------------------------------------------------------
-async function extractProductId(productUrl) {
+async function fetchRemoteStockFromProductPage(productUrl) {
   const res = await fetch(productUrl, {
     headers: { "User-Agent": "Mozilla/5.0 (compatible; NosmokeSignage/1.0)" },
   });
   if (!res.ok) throw new Error("Klarte ikke hente produktsiden (" + res.status + ")");
   const html = await res.text();
 
-  const patterns = [
-    /data-product-id=["']?(\d+)["']?/i,
-    /"product_id"\s*:\s*(\d+)/i,
-    /\bproduct\b[\s\r\n]+(\d+)\b/i, // fallback: fanger mønsteret vi observerte i markdown-dumpen
-  ];
-  for (const re of patterns) {
-    const m = html.match(re);
-    if (m) return m[1];
+  const match = html.match(/var\s+remote_stock\s*=\s*(\{[\s\S]*?\});/);
+  if (!match) {
+    throw new Error("Fant ikke remote_stock-data på siden " + productUrl);
   }
-  throw new Error("Fant ikke produkt-ID i HTML-en for " + productUrl);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (e) {
+    throw new Error("Klarte ikke tolke remote_stock-JSON: " + e.message);
+  }
+
+  // Strukturen er { stock: { <butikk-subdomene>: { <produktId>: {store, qty, stock} } } }
+  return parsed.stock || {};
 }
 
 // ---------------------------------------------------------------------
-// 2. Kall get_remote_stock med POST + form-urlencoded body.
+// 2. Finn "Os" (eller hvilken som helst butikk) sitt antall.
+//    Vi går gjennom alle butikk-subdomener og alle produkt-ID-er under
+//    hver (normalt bare én), og matcher på "store"-navnet.
 // ---------------------------------------------------------------------
-async function fetchRemoteStock(productId) {
-  const res = await fetch(
-    "https://www.nosmoke.no/ajax.php?action=ajax&ajaxfunc=get_remote_stock",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (compatible; NosmokeSignage/1.0)",
-        Accept: "application/json",
-      },
-      body: new URLSearchParams({ product_ids: String(productId) }).toString(),
-    }
-  );
-  if (!res.ok) throw new Error("get_remote_stock svarte " + res.status);
-  return res.json();
-}
-
-// ---------------------------------------------------------------------
-// 3. Finn "Os" (eller hvilken som helst butikk) sitt antall i responsen.
-//    Responsen er strukturert som { <mystore-subdomene>: { <productId>: {store, qty, stock} } }
-//    så vi går gjennom alle subdomenene og matcher på "store"-navnet,
-//    i stedet for å hardkode subdomenenavnet (som kan endres).
-// ---------------------------------------------------------------------
-function findStoreInResponse(data, productId, storeName) {
-  for (const subdomainKey of Object.keys(data)) {
-    const entry = data[subdomainKey]?.[productId];
-    if (!entry) continue;
-    if ((entry.store || "").trim().toLowerCase() === storeName.trim().toLowerCase()) {
-      return {
-        store: entry.store,
-        qty: Number(entry.qty ?? 0),
-        inStock: Number(entry.qty ?? 0) > 0,
-        variants: entry.stock || {},
-        found: true,
-      };
+function findStoreQty(stockData, storeName) {
+  for (const subdomainKey of Object.keys(stockData)) {
+    const productEntries = stockData[subdomainKey];
+    for (const productId of Object.keys(productEntries)) {
+      const entry = productEntries[productId];
+      if ((entry.store || "").trim().toLowerCase() === storeName.trim().toLowerCase()) {
+        const qty = Number(entry.qty ?? 0);
+        return {
+          store: entry.store,
+          qty,
+          inStock: qty > 0,
+          variants: entry.stock || {},
+          found: true,
+        };
+      }
     }
   }
   return { store: storeName, qty: 0, inStock: false, variants: {}, found: false };
 }
 
 // ---------------------------------------------------------------------
-// 4. Enkel cache (5 min) — reduserer antall kall mot nosmoke.no kraftig,
-//    siden mange produkter kan synkes samtidig og noen produkter kan
-//    stå på skjermen i flere kategorier.
+// 3. Enkel cache (5 min) — unngår gjentatte kall mot nosmoke.no når
+//    flere produkter/kategorier synkes rett etter hverandre.
 // ---------------------------------------------------------------------
-const cache = new Map(); // key: `${productId}` -> { data, ts }
+const cache = new Map(); // key: produktUrl -> { data, ts }
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 async function getStockForProduct(productUrl, storeName) {
-  const productId = await extractProductId(productUrl);
-
-  let raw = cache.get(productId);
+  let raw = cache.get(productUrl);
   if (!raw || Date.now() - raw.ts > CACHE_TTL_MS) {
-    const data = await fetchRemoteStock(productId);
+    const data = await fetchRemoteStockFromProductPage(productUrl);
     raw = { data, ts: Date.now() };
-    cache.set(productId, raw);
+    cache.set(productUrl, raw);
   }
-
-  return findStoreInResponse(raw.data, productId, storeName);
+  return findStoreQty(raw.data, storeName);
 }
 
 // ---------------------------------------------------------------------
-// 5. Express-route
+// 4. Express-route
 //    GET /stock?url=<produkt-url>&store=Os
 // ---------------------------------------------------------------------
 function registerStockRoute(app) {
@@ -126,34 +105,11 @@ function registerStockRoute(app) {
       res.status(500).json({ error: err.message, inStock: null });
     }
   });
-
-  // --- MIDLERTIDIG DEBUG-ROUTE ------------------------------------
-  // Brukes bare for å finne riktig regex-mønster for produkt-ID-en.
-  // Fjern denne route-en igjen når /stock fungerer stabilt.
-  //
-  // Bruk: /debug-html?url=<produkt-url>
-  // Åpne resultatet i nettleseren, trykk Ctrl+F, søk etter riktig
-  // produkt-ID-tall (f.eks. "11176"), og send meg linjen/teksten
-  // rundt treffet.
-  app.get("/debug-html", async (req, res) => {
-    const { url } = req.query;
-    if (!url) return res.status(400).send("Mangler url");
-    try {
-      const html = await fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; NosmokeSignage/1.0)" },
-      }).then((r) => r.text());
-      res.set("Content-Type", "text/plain; charset=utf-8");
-      res.send(html);
-    } catch (err) {
-      res.status(500).send("Feil: " + err.message);
-    }
-  });
-  // -----------------------------------------------------------------
 }
 
 module.exports = { registerStockRoute };
 
-// I server.js:
+// I server.js (allerede satt opp, ingen endring nødvendig):
 //
 //   const { registerStockRoute } = require("./stock-endpoint");
 //   registerStockRoute(app);

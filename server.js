@@ -20,7 +20,7 @@ async function fetchHtml(url) {
     } catch (e) {
         console.log("Første forsøk feilet");
     }
-    
+
     try {
         // Cache-Buster! Dette tvinger nettsiden til å glemme det gamle svaret.
         const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(url) + "&nocache=" + Date.now();
@@ -29,8 +29,21 @@ async function fetchHtml(url) {
     } catch(e) {
         console.log("Proxy feilet");
     }
-    
+
     throw new Error("Klarte ikke laste siden");
+}
+
+function cleanHtmlBlock(raw) {
+    return raw
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<li[^>]*>/gi, ' • ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/\s{3,}/g, '\n\n')
+        .trim();
 }
 
 app.get('/scrape', async (req, res) => {
@@ -51,32 +64,43 @@ app.get('/scrape', async (req, res) => {
         title = title.replace(/\s*[-|]\s*Nosmoke.*/i, '').trim();
 
         const image = extract(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*)["']/i);
-        
+
         let desc = '';
-        
-        const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
-        
-        if (descBlock && descBlock[1]) {
-            desc = descBlock[1]
-                .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ') 
-                .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ') 
-                .replace(/<li[^>]*>/gi, ' • ') 
-                .replace(/<br\s*\/?>/gi, '\n') 
-                .replace(/<\/p>/gi, '\n\n') 
-                .replace(/<[^>]+>/g, '') 
-                .replace(/&nbsp;/gi, ' ')
-                .replace(/\s{3,}/g, '\n\n') 
-                .trim();
+
+        // PRESIS METODE: Nosmoke.no bruker en "Page Builder"-widget der
+        // produktinformasjonen ligger i en fane med id
+        // "tabs-block--pp_tabs<UUID>__pp_tabs-1", og produsent-boilerplate
+        // (f.eks. "Oxva er et relativt ungt firma...") ligger i neste fane,
+        // "__pp_tabs-2". Vi fanger KUN det som ligger mellom disse to,
+        // slik at produsent-teksten aldri kan blande seg inn.
+        const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+        const infoTabRegex = new RegExp(
+            'id=["\']tabs-block--pp_tabs' + uuid + '__pp_tabs-1["\'][^>]*>([\\s\\S]*?)(?=id=["\']tabs-block--pp_tabs' + uuid + '__pp_tabs-2["\'])',
+            'i'
+        );
+        const infoBlock = html.match(infoTabRegex);
+
+        if (infoBlock && infoBlock[1]) {
+            desc = cleanHtmlBlock(infoBlock[1]);
+        }
+
+        // FALLBACK: hvis den presise fane-matchen ikke traff (produktside
+        // uten pp_tabs-widget), bruk de gamle, mer generiske mønstrene.
+        if (!desc || desc.length < 15) {
+            const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
+            if (descBlock && descBlock[1]) {
+                desc = cleanHtmlBlock(descBlock[1]);
+            }
         }
 
         if (desc.toLowerCase().startsWith(title.toLowerCase())) {
             desc = desc.substring(title.length).trim();
         }
-        
+
         desc = desc.replace(/^Produktinformasjon:?\s*/i, '').trim();
 
         if (!desc || desc.length < 15) {
-            desc = extract(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) || 
+            desc = extract(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
                    extract(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) || '';
         }
 
@@ -119,7 +143,7 @@ app.get('/links', async (req, res) => {
     try {
         const html = await fetchHtml(targetUrl);
         const links = [];
-        
+
         const regex = /<a[^>]+href=["']([^"']+)["']/gi;
         let match;
         while ((match = regex.exec(html)) !== null) {

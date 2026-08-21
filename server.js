@@ -1,11 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const { registerStockRoute } = require('./stock-endpoint'); 
+const { registerStockRoute } = require('./stock-endpoint');
 
 const app = express();
 app.use(cors());
 
-registerStockRoute(app); 
+registerStockRoute(app);
 
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -107,6 +107,35 @@ app.get('/scrape', async (req, res) => {
     } catch (error) {
         console.error('FEIL:', error.message);
         res.json({ title: 'Feil ved henting', price: '0,-', error: error.message });
+    }
+});
+
+app.get('/links', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
+
+    console.log("Skanner kategori for produkter:", targetUrl);
+
+    try {
+        const html = await fetchHtml(targetUrl);
+        const links = [];
+        
+        const regex = /<a[^>]+href=["']([^"']+)["']/gi;
+        let match;
+        while ((match = regex.exec(html)) !== null) {
+            let href = match[1];
+            if (href.includes('/products/') || href.includes('/produkt/')) {
+                if (!href.startsWith('http')) {
+                    href = 'https://www.nosmoke.no' + (href.startsWith('/') ? href : '/' + href);
+                }
+                if (!links.includes(href)) {
+                    links.push(href);
+                }
+            }
+        }
+        res.json({ links });
+    } catch (error) {
+        res.status(500).json({ error: error.message, links: [] });
     }
 });
 

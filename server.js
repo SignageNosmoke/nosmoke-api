@@ -33,17 +33,31 @@ async function fetchHtml(url) {
     throw new Error("Klarte ikke laste siden");
 }
 
+function decodeEntities(str) {
+    return str
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+        .replace(/&oslash;/gi, 'ø').replace(/&Oslash;/g, 'Ø')
+        .replace(/&aring;/gi, 'å').replace(/&Aring;/g, 'Å')
+        .replace(/&aelig;/gi, 'æ').replace(/&AElig;/g, 'Æ')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+}
+
 function cleanHtmlBlock(raw) {
-    return raw
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<li[^>]*>/gi, ' • ')
-        .replace(/<br\s*\/?>/gi, '\n')
-        .replace(/<\/p>/gi, '\n\n')
-        .replace(/<[^>]+>/g, '')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/\s{3,}/g, '\n\n')
-        .trim();
+    return decodeEntities(
+        raw
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<li[^>]*>/gi, ' • ')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/p>/gi, '\n\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/\s{3,}/g, '\n\n')
+            .trim()
+    );
 }
 
 app.get('/scrape', async (req, res) => {
@@ -67,18 +81,26 @@ app.get('/scrape', async (req, res) => {
 
         let desc = '';
 
-        // PRESIS METODE: Nosmoke.no sin fane-widget bruker et generert
-        // UUID som binder sammen fane-knappen og selve innholds-panelet.
-        // Vi finner UUID-en via aria-controls-attributtet (som alltid
-        // peker på det ekte innholds-panelet, "panel-block--pp_tabs<UUID>__pp_tabs-N"),
-        // og fanger deretter alt som ligger MELLOM panel-1 (Informasjon)
-        // og panel-2 (Produsent) - aldri selve fane-knappene i menyen.
-        const uuidMatch = html.match(/aria-controls=["']panel-block--pp_tabs([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})__pp_tabs-\d+["']/i);
+        // PRESIS METODE (verifisert mot faktisk HTML fra nosmoke.no):
+        // UUID-en Mystore genererer for fane-widgeten dukker opp flere
+        // steder (href, id, aria-controls, aria-labelledby) - vi plukker
+        // den ganske enkelt ut av MØNSTERET "pp_tabs<UUID>__pp_tabs-1",
+        // uansett hvilket attributt den står i.
+        const uuidMatch = html.match(/pp_tabs([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})__pp_tabs-1/i);
 
         if (uuidMatch) {
             const uuid = uuidMatch[1];
+            // Selve innholds-panelet ser slik ut i den rå HTML-en:
+            //   <div class="__description_tab tab-panel ..." role="tabpanel"
+            //        id="panel-block--pp_tabs<UUID>__pp_tabs-1" aria-labelledby="...">
+            //     <div class="card-body">
+            //       <p><strong>Produktnavn</strong></p>
+            //       <p>Selve beskrivelsen...</p>
+            //       ...
+            // Vi fanger alt fra id="panel-block--...__pp_tabs-1" og frem til
+            // id="panel-block--...__pp_tabs-2" starter (Produsent-panelet).
             const panelRegex = new RegExp(
-                'id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-1["\'][^>]*>([\\s\\S]*?)id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-2["\']',
+                'id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-1["\'][\\s\\S]*?<div class=["\']card-body["\']>([\\s\\S]*?)id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-2["\']',
                 'i'
             );
             const panelMatch = html.match(panelRegex);
@@ -90,7 +112,7 @@ app.get('/scrape', async (req, res) => {
         // FALLBACK: hvis siden ikke bruker denne fane-widgeten i det hele
         // tatt, bruk de gamle, mer generiske mønstrene.
         if (!desc || desc.length < 15) {
-            const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
+            const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
             if (descBlock && descBlock[1]) {
                 desc = cleanHtmlBlock(descBlock[1]);
             }

@@ -67,25 +67,32 @@ app.get('/scrape', async (req, res) => {
 
         let desc = '';
 
-        // PRESIS METODE: Nosmoke.no bruker en "Page Builder"-widget der
-        // produktinformasjonen ligger i en fane med id
-        // "tabs-block--pp_tabs<UUID>__pp_tabs-1", og produsent-boilerplate
-        // (f.eks. "Oxva er et relativt ungt firma...") ligger i neste fane,
-        // "__pp_tabs-2". Vi fanger KUN det som ligger mellom disse to,
-        // slik at produsent-teksten aldri kan blande seg inn.
-        const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-        const infoTabRegex = new RegExp(
-            'id=["\']tabs-block--pp_tabs' + uuid + '__pp_tabs-1["\'][^>]*>([\\s\\S]*?)(?=id=["\']tabs-block--pp_tabs' + uuid + '__pp_tabs-2["\'])',
-            'i'
-        );
-        const infoBlock = html.match(infoTabRegex);
+        // PRESIS METODE: finn den synlige teksten "Informasjon" (fane-
+        // overskriften på nosmoke.no) og fang alt frem til enten
+        // "Produktinformasjon:" (starten på spesifikasjonslisten) eller
+        // "Produsent" (neste fane). Vi starter søket etter "Legg i
+        // handlekurv" for å garantert hoppe forbi meny/header, slik at vi
+        // aldri ved et uhell treffer et annet sted på siden.
+        let searchArea = html;
+        const cartIdx = html.search(/Legg i handlekurv/i);
+        if (cartIdx !== -1) searchArea = html.slice(cartIdx);
 
-        if (infoBlock && infoBlock[1]) {
-            desc = cleanHtmlBlock(infoBlock[1]);
+        const infoStart = searchArea.search(/>\s*Informasjon\s*</i);
+        if (infoStart !== -1) {
+            const afterInfo = searchArea.slice(infoStart);
+            const specIdx = afterInfo.search(/Produktinformasjon\s*:/i);
+            const producerIdx = afterInfo.search(/>\s*Produsent\s*</i);
+
+            let cutAt = -1;
+            if (specIdx !== -1 && (producerIdx === -1 || specIdx < producerIdx)) cutAt = specIdx;
+            else if (producerIdx !== -1) cutAt = producerIdx;
+
+            const rawSection = cutAt !== -1 ? afterInfo.slice(0, cutAt) : afterInfo.slice(0, 3000);
+            desc = cleanHtmlBlock(rawSection);
         }
 
-        // FALLBACK: hvis den presise fane-matchen ikke traff (produktside
-        // uten pp_tabs-widget), bruk de gamle, mer generiske mønstrene.
+        // FALLBACK: hvis den presise metoden ikke traff, bruk de gamle,
+        // mer generiske mønstrene.
         if (!desc || desc.length < 15) {
             const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
             if (descBlock && descBlock[1]) {

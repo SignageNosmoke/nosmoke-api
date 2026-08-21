@@ -84,28 +84,29 @@ app.get('/scrape', async (req, res) => {
         // PRESIS METODE (verifisert mot faktisk HTML fra nosmoke.no):
         // UUID-en Mystore genererer for fane-widgeten dukker opp flere
         // steder (href, id, aria-controls, aria-labelledby) - vi plukker
-        // den ganske enkelt ut av MØNSTERET "pp_tabs<UUID>__pp_tabs-1",
-        // uansett hvilket attributt den står i.
+        // den ut av mønsteret "pp_tabs<UUID>__pp_tabs-1".
         const uuidMatch = html.match(/pp_tabs([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})__pp_tabs-1/i);
 
         if (uuidMatch) {
             const uuid = uuidMatch[1];
-            // Selve innholds-panelet ser slik ut i den rå HTML-en:
-            //   <div class="__description_tab tab-panel ..." role="tabpanel"
-            //        id="panel-block--pp_tabs<UUID>__pp_tabs-1" aria-labelledby="...">
-            //     <div class="card-body">
-            //       <p><strong>Produktnavn</strong></p>
-            //       <p>Selve beskrivelsen...</p>
-            //       ...
-            // Vi fanger alt fra id="panel-block--...__pp_tabs-1" og frem til
-            // id="panel-block--...__pp_tabs-2" starter (Produsent-panelet).
-            const panelRegex = new RegExp(
-                'id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-1["\'][\\s\\S]*?<div class=["\']card-body["\']>([\\s\\S]*?)id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-2["\']',
+            const startRegex = new RegExp(
+                'id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-1["\'][\\s\\S]*?<div class=["\']card-body["\']>',
                 'i'
             );
-            const panelMatch = html.match(panelRegex);
-            if (panelMatch && panelMatch[1]) {
-                desc = cleanHtmlBlock(panelMatch[1]);
+            const startMatchResult = html.match(startRegex);
+
+            if (startMatchResult) {
+                const afterStart = html.slice(startMatchResult.index + startMatchResult[0].length);
+
+                // Stopp ved FØRSTE tegn av "manufacturer_tab" (dukker opp
+                // enten som mobil-accordion-overskrift eller selve
+                // Produsent-panelet - uansett hva som kommer først i
+                // koden, skal vi stoppe der). Hvis produktet ikke har en
+                // Produsent-fane i det hele tatt, faller vi tilbake på et
+                // fast tak på 2000 tegn.
+                const stopIdx = afterStart.search(/manufacturer_tab/i);
+                const rawSection = stopIdx !== -1 ? afterStart.slice(0, stopIdx) : afterStart.slice(0, 2000);
+                desc = cleanHtmlBlock(rawSection);
             }
         }
 

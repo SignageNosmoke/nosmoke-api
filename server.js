@@ -67,32 +67,28 @@ app.get('/scrape', async (req, res) => {
 
         let desc = '';
 
-        // PRESIS METODE: finn den synlige teksten "Informasjon" (fane-
-        // overskriften på nosmoke.no) og fang alt frem til enten
-        // "Produktinformasjon:" (starten på spesifikasjonslisten) eller
-        // "Produsent" (neste fane). Vi starter søket etter "Legg i
-        // handlekurv" for å garantert hoppe forbi meny/header, slik at vi
-        // aldri ved et uhell treffer et annet sted på siden.
-        let searchArea = html;
-        const cartIdx = html.search(/Legg i handlekurv/i);
-        if (cartIdx !== -1) searchArea = html.slice(cartIdx);
+        // PRESIS METODE: Nosmoke.no sin fane-widget bruker et generert
+        // UUID som binder sammen fane-knappen og selve innholds-panelet.
+        // Vi finner UUID-en via aria-controls-attributtet (som alltid
+        // peker på det ekte innholds-panelet, "panel-block--pp_tabs<UUID>__pp_tabs-N"),
+        // og fanger deretter alt som ligger MELLOM panel-1 (Informasjon)
+        // og panel-2 (Produsent) - aldri selve fane-knappene i menyen.
+        const uuidMatch = html.match(/aria-controls=["']panel-block--pp_tabs([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})__pp_tabs-\d+["']/i);
 
-        const infoStart = searchArea.search(/>\s*Informasjon\s*</i);
-        if (infoStart !== -1) {
-            const afterInfo = searchArea.slice(infoStart);
-            const specIdx = afterInfo.search(/Produktinformasjon\s*:/i);
-            const producerIdx = afterInfo.search(/>\s*Produsent\s*</i);
-
-            let cutAt = -1;
-            if (specIdx !== -1 && (producerIdx === -1 || specIdx < producerIdx)) cutAt = specIdx;
-            else if (producerIdx !== -1) cutAt = producerIdx;
-
-            const rawSection = cutAt !== -1 ? afterInfo.slice(0, cutAt) : afterInfo.slice(0, 3000);
-            desc = cleanHtmlBlock(rawSection);
+        if (uuidMatch) {
+            const uuid = uuidMatch[1];
+            const panelRegex = new RegExp(
+                'id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-1["\'][^>]*>([\\s\\S]*?)id=["\']panel-block--pp_tabs' + uuid + '__pp_tabs-2["\']',
+                'i'
+            );
+            const panelMatch = html.match(panelRegex);
+            if (panelMatch && panelMatch[1]) {
+                desc = cleanHtmlBlock(panelMatch[1]);
+            }
         }
 
-        // FALLBACK: hvis den presise metoden ikke traff, bruk de gamle,
-        // mer generiske mønstrene.
+        // FALLBACK: hvis siden ikke bruker denne fane-widgeten i det hele
+        // tatt, bruk de gamle, mer generiske mønstrene.
         if (!desc || desc.length < 15) {
             const descBlock = html.match(/(?:id=["'](?:tab-)?description["']|id=["']tab-1["']|itemprop=["']description["']|class=["'][^"']*product-description[^"']*["'])[^>]*>([\s\S]{50,3000})/i);
             if (descBlock && descBlock[1]) {
@@ -172,3 +168,30 @@ app.get('/links', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Lynrask server kjører på port ${PORT}`));
+
+// --- MIDLERTIDIG DIAGNOSE-ROUTE ------------------------------------
+// Viser 300 tegn før og 2500 tegn etter første treff av et søkeord i
+// den rå HTML-en, slik at vi kan se nøyaktig hvordan fane-strukturen
+// er bygget opp uten å måtte laste ned hele siden.
+//
+// Bruk: /debug-find?url=<produkt-url>&term=panel-block--pp_tabs
+// (term er valgfri, defaulter til "panel-block--pp_tabs")
+app.get('/debug-find', async (req, res) => {
+    const { url, term } = req.query;
+    if (!url) return res.status(400).send('Mangler url');
+    try {
+        const html = await fetchHtml(url);
+        const searchTerm = term || 'panel-block--pp_tabs';
+        const idx = html.indexOf(searchTerm);
+        if (idx === -1) {
+            return res.send('Fant ikke "' + searchTerm + '" i HTML-en. Total lengde på siden: ' + html.length + ' tegn.');
+        }
+        const start = Math.max(0, idx - 300);
+        const end = Math.min(html.length, idx + 2500);
+        res.set('Content-Type', 'text/plain; charset=utf-8');
+        res.send(html.slice(start, end));
+    } catch (err) {
+        res.status(500).send('Feil: ' + err.message);
+    }
+});
+// ---------------------------------------------------------------------

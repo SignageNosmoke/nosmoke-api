@@ -60,9 +60,27 @@ function cleanHtmlBlock(raw) {
     );
 }
 
+// SIKKERHET: uten dette godtok /scrape, /links og /debug-find en HVILKEN
+// SOM HELST url-parameter og hentet den rått - dvs. at hvem som helst kunne
+// bruke denne serveren som en åpen, anonym proxy mot en vilkårlig nettside
+// (kostnad/misbruk på VÅR Render-konto, og risiko for at IP-en vår
+// svartelistes av tredjeparter). Nå avvises alt som ikke peker til
+// nosmoke.no FØR vi i det hele tatt gjør et fetch-kall.
+function isAllowedTargetUrl(rawUrl) {
+    try {
+        const u = new URL(rawUrl);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        const host = u.hostname.toLowerCase();
+        return host === 'nosmoke.no' || host === 'www.nosmoke.no';
+    } catch (e) {
+        return false;
+    }
+}
+
 app.get('/scrape', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
+    if (!isAllowedTargetUrl(targetUrl)) return res.status(400).json({ error: 'Kun lenker til nosmoke.no er tillatt' });
 
     console.log("Henter data raskt for:", targetUrl);
 
@@ -163,6 +181,7 @@ app.get('/scrape', async (req, res) => {
 app.get('/links', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).json({ error: 'Mangler URL' });
+    if (!isAllowedTargetUrl(targetUrl)) return res.status(400).json({ error: 'Kun lenker til nosmoke.no er tillatt' });
 
     console.log("Skanner kategori for produkter:", targetUrl);
 
@@ -191,30 +210,3 @@ app.get('/links', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Lynrask server kjører på port ${PORT}`));
-
-// --- MIDLERTIDIG DIAGNOSE-ROUTE ------------------------------------
-// Viser 300 tegn før og 2500 tegn etter første treff av et søkeord i
-// den rå HTML-en, slik at vi kan se nøyaktig hvordan fane-strukturen
-// er bygget opp uten å måtte laste ned hele siden.
-//
-// Bruk: /debug-find?url=<produkt-url>&term=panel-block--pp_tabs
-// (term er valgfri, defaulter til "panel-block--pp_tabs")
-app.get('/debug-find', async (req, res) => {
-    const { url, term } = req.query;
-    if (!url) return res.status(400).send('Mangler url');
-    try {
-        const html = await fetchHtml(url);
-        const searchTerm = term || 'panel-block--pp_tabs';
-        const idx = html.indexOf(searchTerm);
-        if (idx === -1) {
-            return res.send('Fant ikke "' + searchTerm + '" i HTML-en. Total lengde på siden: ' + html.length + ' tegn.');
-        }
-        const start = Math.max(0, idx - 300);
-        const end = Math.min(html.length, idx + 2500);
-        res.set('Content-Type', 'text/plain; charset=utf-8');
-        res.send(html.slice(start, end));
-    } catch (err) {
-        res.status(500).send('Feil: ' + err.message);
-    }
-});
-// ---------------------------------------------------------------------

@@ -157,6 +157,15 @@ app.get('/scrape', async (req, res) => {
             desc = '';
         }
 
+        // NYTT: les smak og styrke FØR beskrivelsen kuttes til 250 tegn.
+        // "Styrke: 14mg/gram" står ofte lenger ned på siden og ble ellers klippet bort.
+        // Brukes av etikettsiden (etiketter.html) til å fylle ut E-ink-lappene.
+        let smak = '', styrke = '';
+        const smakMatch = desc.match(/Smak:\s*([^\n•]+)/i);
+        if (smakMatch) smak = smakMatch[1].trim();
+        const styrkeMatch = desc.match(/Styrke[^:\n]*:\s*([^\n•]+)/i);
+        if (styrkeMatch) styrke = styrkeMatch[1].trim();
+
         if (desc.length > 250) {
             desc = desc.substring(0, 247) + '...';
         }
@@ -170,7 +179,7 @@ app.get('/scrape', async (req, res) => {
             if (priceMatch) price = priceMatch[1].replace(/\s/g, '').replace('.', '') + ',-';
         }
 
-        res.json({ title, image, desc, price });
+        res.json({ title, image, desc, price, smak, styrke });
 
     } catch (error) {
         console.error('FEIL:', error.message);

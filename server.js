@@ -246,7 +246,7 @@ app.get('/links', async (req, res) => {
 // =====================================================================
 const SITEMAP_URL = process.env.SITEMAP_URL || 'https://www.nosmoke.no/sitemap.xml';
 const GAP_MS = 2500;
-const DAILY_CAP = 300;
+const DAILY_CAP = 600;
 const BLOCK_MS = 6 * 60 * 60 * 1000;
 const SITEMAP_TTL = 24 * 60 * 60 * 1000;
 const PRODUCT_TTL = 12 * 60 * 60 * 1000;
@@ -369,6 +369,70 @@ app.get('/dryrun', async (req, res) => {
         out.feil = e.message;
     }
     res.type('json').send(JSON.stringify(out, null, 2));
+});
+
+// =====================================================================
+// /prices  (brukes av etikettsiden)
+// Tar imot en liste med produktlenker, svarer UMIDDELBART med det som er kjent
+// og henter resten i bakgrunnen, én side om gangen via den samme sikre køen.
+// Klienten spør på nytt til pending = 0. Ingenting skrives noe sted.
+// =====================================================================
+app.use(express.json({ limit: '50kb' }));
+const MAX_PRICES = 80, MAX_QUEUE = 250;
+const PRICE_TTL = 4 * 60 * 60 * 1000, ERR_TTL = 30 * 60 * 1000, FORCE_MIN = 20 * 60 * 1000;
+const priceState = new Map();   // url -> {state:'queued'|'done'|'error', price,title,t,error}
+const priceQueue = [];
+let priceWorker = false;
+
+async function runPriceWorker() {
+    if (priceWorker) return;
+    priceWorker = true;
+    try {
+        while (priceQueue.length) {
+            const url = priceQueue.shift();
+            try {
+                const html = await politeGet(url);
+                const price = readPrice(html), title = readTitle(html);
+                if (price === null) throw new Error('Fant ikke pris på siden');
+                if (price <= 0) throw new Error('Prisen på siden er 0');
+                priceState.set(url, { state: 'done', price, title, t: Date.now() });
+            } catch (e) {
+                priceState.set(url, { state: 'error', error: e.message, t: Date.now() });
+                if (Date.now() < blockedUntil) {
+                    while (priceQueue.length) priceState.set(priceQueue.shift(), { state: 'error', error: 'Pauset: ' + blockReason, t: Date.now() });
+                }
+            }
+        }
+    } finally { priceWorker = false; }
+}
+
+app.post('/prices', (req, res) => {
+    const body = req.body || {};
+    const force = body.force === true;
+    const urls = [...new Set((Array.isArray(body.urls) ? body.urls : []).map(String))]
+        .filter(u => isAllowedTargetUrl(u) && /\/products\//i.test(u)).slice(0, MAX_PRICES);
+    const results = {}, errors = {};
+    let pending = 0;
+    for (const u of urls) {
+        const st = priceState.get(u);
+        const age = st ? Date.now() - st.t : Infinity;
+        let fresh = false;
+        if (st) {
+            if (st.state === 'queued') fresh = true;
+            else if (st.state === 'done') fresh = force ? age < FORCE_MIN : age < PRICE_TTL;
+            else fresh = force ? false : age < ERR_TTL;
+        }
+        if (!fresh) {
+            if (priceQueue.length >= MAX_QUEUE) { errors[u] = 'Køen er full, prøv igjen senere'; continue; }
+            priceState.set(u, { state: 'queued', t: Date.now() });
+            priceQueue.push(u); pending++; continue;
+        }
+        if (st.state === 'queued') pending++;
+        else if (st.state === 'done') results[u] = { price: st.price, title: st.title, t: st.t };
+        else errors[u] = st.error;
+    }
+    runPriceWorker();
+    res.json({ results, errors, pending, total: urls.length, paused: Date.now() < blockedUntil, pausedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null });
 });
 
 app.get('/status', (req, res) => {

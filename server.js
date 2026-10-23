@@ -329,7 +329,7 @@ function readTitle(html) {
     return decodeEntities(t).replace(/\s*[-|]\s*Nosmoke.*/i, '').trim();
 }
 
-// Åpne i nettleser: /dryrun            -> sitemap (1 forespørsel) + 5 LD-produkter
+// Åpne i nettleser: /dryrun            -> sitemap (1 forespørsel) + 5 produkter hvis adresse starter med /products/ld-
 //                   /dryrun?q=snus&n=3 -> filtrer på tekst i adressen
 //                   /dryrun?urls=<url1>,<url2>  -> bestemte produkter (maks 5)
 app.get('/dryrun', async (req, res) => {
@@ -343,7 +343,7 @@ app.get('/dryrun', async (req, res) => {
         if (req.query.urls) {
             urls = String(req.query.urls).split(',').map(x => x.trim()).filter(Boolean);
         } else {
-            const q = String(req.query.q || 'ld-').toLowerCase();
+            const q = String(req.query.q || '/products/ld-').toLowerCase();
             urls = sm.products.map(p => p.url).filter(u => u.toLowerCase().includes(q));
         }
         urls = urls.filter(u => isAllowedTargetUrl(u) && /\/products\//i.test(u)).slice(0, n);

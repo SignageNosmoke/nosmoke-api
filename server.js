@@ -329,6 +329,11 @@ function readTitle(html) {
     return decodeEntities(t).replace(/\s*[-|]\s*Nosmoke.*/i, '').trim();
 }
 
+function readImage(html) {
+    const u = decodeEntities((html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*)["']/i) || [])[1] || '').trim();
+    return /^https:\/\//i.test(u) ? u : '';
+}
+
 // Åpne i nettleser: /dryrun            -> sitemap (1 forespørsel) + 5 produkter hvis adresse starter med /products/ld-
 //                   /dryrun?q=snus&n=3 -> filtrer på tekst i adressen
 //                   /dryrun?urls=<url1>,<url2>  -> bestemte produkter (maks 5)
@@ -392,10 +397,10 @@ async function runPriceWorker() {
             const url = priceQueue.shift();
             try {
                 const html = await politeGet(url);
-                const price = readPrice(html), title = readTitle(html);
+                const price = readPrice(html), title = readTitle(html), image = readImage(html);
                 if (price === null) throw new Error('Fant ikke pris på siden');
                 if (price <= 0) throw new Error('Prisen på siden er 0');
-                priceState.set(url, { state: 'done', price, title, t: Date.now() });
+                priceState.set(url, { state: 'done', price, title, image, t: Date.now() });
             } catch (e) {
                 priceState.set(url, { state: 'error', error: e.message, t: Date.now() });
                 if (Date.now() < blockedUntil) {
@@ -428,7 +433,7 @@ app.post('/prices', (req, res) => {
             priceQueue.push(u); pending++; continue;
         }
         if (st.state === 'queued') pending++;
-        else if (st.state === 'done') results[u] = { price: st.price, title: st.title, t: st.t };
+        else if (st.state === 'done') results[u] = { price: st.price, title: st.title, image: st.image || '', t: st.t };
         else errors[u] = st.error;
     }
     runPriceWorker();
